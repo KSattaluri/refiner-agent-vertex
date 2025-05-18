@@ -41,7 +41,7 @@ star_generator_with_history = Agent(
     description=star_generator.description,
     instruction=star_generator.instruction,
     tools=[append_star_response],  # Add tool to append to history
-    output_key=star_generator.output_key
+    output_key="current_answer"
 )
 
 # Modify star_critique to handle appending critiques
@@ -133,7 +133,7 @@ star_critique_with_history = Agent(
        - "suggestions": A list of 2-3 strings, each a concrete suggestion for improvement
     """,
     tools=[rate_star_answer, append_critique],
-    output_key=star_critique.output_key
+    output_key="critique_feedback"
 )
 
 # Modify star_refiner to handle appending refined responses
@@ -143,7 +143,7 @@ star_refiner_with_history = Agent(
     description=star_refiner.description,
     instruction=star_refiner.instruction,
     tools=[append_star_response],
-    output_key=star_refiner.output_key
+    output_key="current_answer"
 )
 
 # Agent for retrieving final output from state

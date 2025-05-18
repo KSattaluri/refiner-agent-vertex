@@ -5,7 +5,7 @@ This agent collects the required inputs for generating a STAR format answer.
 """
 
 from google.adk.agents.llm_agent import LlmAgent
-from ...tools import generate_star_answer
+from .tools import collect_star_inputs
 
 # Constants
 GEMINI_MODEL = "gemini-2.0-flash"
@@ -32,14 +32,14 @@ input_collector = LlmAgent(
     - Keep track of what information has been provided and what is still needed
     
     ## STRICT RULES
-    - ONLY call the generate_star_answer tool when you have collected ALL THREE required pieces of information
-    - If generate_star_answer returns an error about missing fields, ask the user for those specific fields
+    - ONLY call the collect_star_inputs tool when you have collected ALL THREE required pieces of information
+    - If collect_star_inputs returns an error about missing fields, ask the user for those specific fields
     - NEVER proceed without complete required information
     - DO NOT ask about optional information like resume or job description
     - DO NOT ask for confirmation before proceeding - proceed automatically once you have all required info
     - DO NOT provide any commentary or explanations about the process
     """,
     description="Collects the required information for generating STAR format answers",
-    tools=[generate_star_answer],
+    tools=[collect_star_inputs],
     output_key="input_data",
 )

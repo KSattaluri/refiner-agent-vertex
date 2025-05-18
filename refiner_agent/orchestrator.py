@@ -179,36 +179,20 @@ class STAROrchestrator(BaseAgent):
             import time
             time.sleep(0.1)
 
-            # Get the critique feedback and rating from the refreshed session state
-            critique_feedback = current_session.state.get("critique_feedback", {})
-
-            # Detailed logging of critique feedback to help debug
-            logger.info(f"[{self.name}] Raw critique feedback type: {type(critique_feedback).__name__}")
-            if isinstance(critique_feedback, dict):
-                logger.info(f"[{self.name}] Critique feedback keys: {list(critique_feedback.keys())}")
-                if 'rating' in critique_feedback:
-                    logger.info(f"[{self.name}] Raw rating value from dict: {critique_feedback['rating']}")
-
-            # Handle different formats of critique_feedback
+            # Get the rating from the current iteration
+            # The append_critique tool has already stored it properly in iterations
             rating = 0.0
-            if isinstance(critique_feedback, dict) and "rating" in critique_feedback:
-                rating = float(critique_feedback.get("rating", 0.0))
-            elif hasattr(critique_feedback, 'rating'):
-                rating = float(getattr(critique_feedback, 'rating', 0.0))
-            elif isinstance(critique_feedback, str):
-                # Try to parse from JSON string
-                try:
-                    import json
-                    cleaned_feedback = critique_feedback.strip()
-                    if cleaned_feedback.startswith('```json'):
-                        cleaned_feedback = cleaned_feedback[7:].strip()
-                    if cleaned_feedback.endswith('```'):
-                        cleaned_feedback = cleaned_feedback[:-3].strip()
-                    parsed = json.loads(cleaned_feedback)
-                    if isinstance(parsed, dict) and 'rating' in parsed:
-                        rating = float(parsed['rating'])
-                except Exception as e:
-                    logger.error(f"[{self.name}] Error parsing critique feedback: {e}")
+            iterations = current_session.state.get("iterations", [])
+            current_iteration = current_session.state.get("current_iteration", 1)
+
+            # Find the current iteration's critique
+            for iter_data in iterations:
+                if iter_data.get("iteration") == current_iteration:
+                    critique = iter_data.get("critique", {})
+                    if isinstance(critique, dict):
+                        rating = float(critique.get("rating", 0.0))
+                    logger.info(f"[{self.name}] Retrieved rating {rating} from iteration {current_iteration}")
+                    break
 
             # Get the highest rated iteration information directly from iterations
             iterations = ctx.session.state.get("iterations", [])
@@ -264,7 +248,7 @@ class STAROrchestrator(BaseAgent):
             
             # Update iteration state
             # Use state delta to ensure atomic updates
-            update_iteration_info(ctx, iteration, critique_feedback)
+            update_iteration_info(ctx, iteration)
             
             # Use the maximum of current rating and highest rating for threshold check
             threshold_check_rating = max(rating, highest_rating)
@@ -329,15 +313,14 @@ class STAROrchestrator(BaseAgent):
         logger.info(f"[{self.name}] STAR workflow completed with status: {ctx.session.state.get('final_status')}")
 
 
-def update_iteration_info(ctx: InvocationContext, current_iteration: int, critique_feedback: dict) -> None:
+def update_iteration_info(ctx: InvocationContext, current_iteration: int) -> None:
     """
     Helper function to update iteration information in state.
     Uses EventActions.state_delta when available for atomic updates.
-    
+
     Args:
         ctx: Invocation context with access to session state
         current_iteration: The current iteration number
-        critique_feedback: The critique feedback for this iteration
     """
     # Check if state_delta is available via actions
     if hasattr(ctx, 'actions') and hasattr(ctx.actions, 'state_delta'):

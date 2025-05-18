@@ -5,7 +5,7 @@ This agent evaluates STAR format answers for quality and provides feedback.
 """
 
 from google.adk.agents.llm_agent import LlmAgent
-from ...tools import rate_star_answer, finalize_agent_output
+from ...tools import rate_star_answer
 
 # Constants
 GEMINI_MODEL = "gemini-2.0-flash"
@@ -118,24 +118,9 @@ star_critique = LlmAgent(
        Your entire process and output format depend on the rating you calculate after calling `rate_star_answer`.
 
        **A. If your calculated rating is 4.6 OR HIGHER (HIGH RATING WORKFLOW):**
-          You MUST IGNORE the "Standard Output Format" instructions described in point 2 above. Your *entire* behavior for this turn is dictated by the following steps PRECISELY:
-
-          STEP 1: Your VERY FIRST and ONLY action in your turn MUST be to call the `finalize_agent_output` tool.
-             Example tool call (DO NOT use markdown fences for the tool call itself):
-             `finalize_agent_output(rating=4.8)` (use your actual calculated rating).
-
-          STEP 2: The `finalize_agent_output` tool will then return a JSON response TO YOU (the LLM).
-             This response will contain a key named "final_agent_output". The VALUE associated with this "final_agent_output" key is the *exact* data package you need to output.
-
-          STEP 3: **FINAL OUTPUT FOR HIGH RATING (OVERRIDE):**
-             Your final response for this turn MUST BE *ONLY* the JSON data that was the VALUE of the "final_agent_output" key from the tool's response in STEP 2.
-             1. Extract this specific JSON data (the dictionary value associated with the "final_agent_output" key).
-             2. This extracted dictionary IS YOUR COMPLETE AND ONLY JSON RESPONSE for this turn.
-
-             **ABSOLUTELY DO NOT:**
-             - Output any JSON for this high-rating scenario.
-             - Attempt to relay or re-format the `final_agent_output` from the tool. The system will use the tool's direct output.
-             - Add any of your own thoughts beyond a brief confirmation message similar to the example.
+          1. Provide your standard JSON output as described in point 2 above.
+          2. Include positive feedback highlighting the strengths of the answer.
+          3. If there are any minor suggestions, include them constructively.
 
        **B. If your calculated rating is BELOW 4.6 (NORMAL RATING WORKFLOW):**
           1. Analyze the `star_answer` against the evaluation criteria (if you haven't fully done so for rating).
@@ -145,6 +130,6 @@ star_critique = LlmAgent(
           5. Output your JSON critique *strictly following* the "Standard Output Format" described in "OUTPUT INSTRUCTIONS, point 2", using markdown JSON fences (e.g., ```json ... ```).
     """,
     description="Evaluates STAR answers and provides specific feedback for improvement",
-    tools=[rate_star_answer, finalize_agent_output],
+    tools=[rate_star_answer],
     output_key="critique_feedback",
 )
