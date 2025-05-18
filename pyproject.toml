@@ -1,0 +1,42 @@
+[project]
+name = "refiner-agent-vertex"
+version = "0.1.0"
+description = "A sample agent for Vertex AI deployment using the ADK"
+authors = [
+    {name = "Your Name", email = "your.email@example.com"} # TODO: Update with your details
+]
+readme = "README.md"
+requires-python = ">=3.12" # Matches the example, adjust if your agent needs a different version
+license = "Apache License 2.0" # Or your preferred license
+
+[tool.poetry]
+packages = [
+    { include = "backend" }
+]
+
+[tool.poetry.dependencies]
+python = ">=3.12"
+requests = "^2.31.0" # General HTTP requests
+pydantic = "^2.7.0"  # For data validation (you have schemas.py)
+python-dotenv = "^1.0.0" # For .env file handling
+google-cloud-aiplatform = {extras = ["adk", "agent-engines"], version = "^1.93.0"} # Core ADK and Vertex AI
+Flask = "^3.0.0" # For the web application interface
+absl-py = "^2.1.0" # For application-level flags and logging
+cloudpickle = "^3.0.0" # For serializing Python objects
+
+# Add any other specific dependencies your sample_agent needs here.
+# For example, if your tools.py or subagents use other libraries.
+
+[tool.poetry.scripts]
+# These scripts allow you to run your deployment tasks using 'poetry run <script-name>'
+# Assumes your deployment scripts (local.py, remote.py, cleanup.py) have a main() function.
+deploy-local = "agent_deploy.local:main"
+deploy-remote = "agent_deploy.remote:main"
+cleanup = "agent_deploy.cleanup:cleanup_deployment" # Assuming cleanup.py has a main function.
+                                   # The example used cleanup_deployment, adjust if needed.
+
+
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
