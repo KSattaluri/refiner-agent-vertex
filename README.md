@@ -6,7 +6,7 @@ A Flask web app that uses Google's Vertex AI to generate interview answers in ST
 
 1. **Clone the repository**
    ```bash
-   git clone <repository-url>
+   git clone https://github.com/KSattaluri/refiner-agent-vertex
    cd refiner-agent-vertex
    ```
 
