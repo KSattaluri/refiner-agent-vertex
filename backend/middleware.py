@@ -111,32 +111,37 @@ def handle_validation_errors(errors: List[APIValidationError]) -> tuple:
 def validate_response(response_data: Dict[str, Any], model: Type[BaseModel]) -> Dict[str, Any]:
     """
     Validates API responses against a Pydantic model.
-    
+
     Args:
         response_data: The data to validate
         model: The Pydantic model class to validate against
-        
+
     Returns:
         The validated data or a fallback error response
     """
     try:
         # Validate against the model
         validated = model.model_validate(response_data)
-        return validated.model_dump()
+        # Make sure we preserve the history when validation succeeds
+        validated_dict = validated.model_dump()
+        logger.info(f"[DEBUG] Validated response with {len(validated_dict.get('history', []))} history items")
+        return validated_dict
     except ValidationError as e:
         logger.error(f"Response validation error: {e}")
-        
+        logger.error(f"[DEBUG] Failed to validate response with {len(response_data.get('history', []))} history items")
+        logger.error(f"[DEBUG] Validation errors: {e.errors()}")
+
         # Create a fallback response
         error_metadata = {
             "status": "ERROR_RESPONSE_VALIDATION",
             "error_message": "The system generated a malformed response"
         }
-        
+
         # Try to preserve original metadata if possible
         if isinstance(response_data, dict) and "metadata" in response_data:
             if isinstance(response_data["metadata"], dict) and "status" in response_data["metadata"]:
                 error_metadata["status"] = response_data["metadata"]["status"]
-            
+
         # Create minimal valid response that matches our updated validators
         fallback_response = {
             "star_answer": None,  # Make this optional
@@ -144,5 +149,5 @@ def validate_response(response_data: Dict[str, Any], model: Type[BaseModel]) -> 
             "history": [],
             "metadata": error_metadata
         }
-        
+
         return fallback_response

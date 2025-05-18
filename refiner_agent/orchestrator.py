@@ -6,6 +6,7 @@ with precise control over the refinement process.
 """
 
 import logging
+import json
 from typing import AsyncGenerator, Optional
 from typing_extensions import override
 
@@ -17,6 +18,18 @@ from google.genai import types
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def update_iteration_info(ctx, iteration_number):
+    """Update the current iteration info in the state."""
+    if hasattr(ctx, 'actions') and hasattr(ctx.actions, 'state_delta'):
+        state_delta = {
+            "current_iteration": iteration_number + 1  # Prepare for next iteration
+        }
+        ctx.actions.state_delta = state_delta
+    else:
+        # Direct state updates as fallback
+        ctx.session.state["current_iteration"] = iteration_number + 1
 
 class STAROrchestrator(BaseAgent):
     """
@@ -150,11 +163,29 @@ class STAROrchestrator(BaseAgent):
         
         # Step 3: Generate initial STAR answer
         logger.info(f"[{self.name}] Generating initial STAR answer...")
-        async for event in self.star_generator.run_async(ctx):
-            # Log event information for debugging
-            logger.info(f"[{self.name}] Event from star_generator: {event.author} (has_content={event.content is not None})")
-            # Forward events from the star_generator
-            yield event
+        try:
+            async for event in self.star_generator.run_async(ctx):
+                # Log event information for debugging
+                logger.info(f"[{self.name}] Event from star_generator: {event.author} (has_content={event.content is not None})")
+                # Forward events from the star_generator
+                yield event
+        except Exception as e:
+            logger.error(f"[{self.name}] Star generator failed: {e}")
+            # Update state with error status
+            if hasattr(ctx, 'actions') and hasattr(ctx.actions, 'state_delta'):
+                state_delta = {
+                    "final_status": "ERROR_AGENT_PROCESSING",
+                    "error_message": f"Star generator failed: {str(e)}"
+                }
+                ctx.actions.state_delta = state_delta
+            else:
+                ctx.session.state["final_status"] = "ERROR_AGENT_PROCESSING"
+                ctx.session.state["error_message"] = f"Star generator failed: {str(e)}"
+
+            # Run output retriever to format error
+            async for event in self.output_retriever.run_async(ctx):
+                yield event
+            return
         
         # Step 4: Iterative refinement loop with conditional execution
         iteration = 1
@@ -165,22 +196,35 @@ class STAROrchestrator(BaseAgent):
             
             # Run critique
             logger.info(f"[{self.name}] Running critique...")
-            async for event in self.star_critique.run_async(ctx):
-                # Log event information for debugging
-                logger.info(f"[{self.name}] Event from star_critique: {event.author} (has_content={event.content is not None})")
-                # Forward events from the star_critique
-                yield event
+            try:
+                async for event in self.star_critique.run_async(ctx):
+                    # Log event information for debugging
+                    logger.info(f"[{self.name}] Event from star_critique: {event.author} (has_content={event.content is not None})")
+                    # Forward events from the star_critique
+                    yield event
+            except Exception as e:
+                logger.error(f"[{self.name}] Star critique failed: {e}")
+                # Update state with error status
+                if hasattr(ctx, 'actions') and hasattr(ctx.actions, 'state_delta'):
+                    state_delta = {
+                        "final_status": "ERROR_AGENT_PROCESSING",
+                        "error_message": f"Star critique failed: {str(e)}"
+                    }
+                    ctx.actions.state_delta = state_delta
+                else:
+                    ctx.session.state["final_status"] = "ERROR_AGENT_PROCESSING"
+                    ctx.session.state["error_message"] = f"Star critique failed: {str(e)}"
+
+                # Run output retriever to format error
+                async for event in self.output_retriever.run_async(ctx):
+                    yield event
+                return
             
-            # Force a refresh of our session state to get the latest updates
-            # EventActions.state_delta might have been used to update state
+            # Get the latest state after critique agent has finished
+            # The state should be updated via state_delta by the append_critique tool
             current_session = ctx.session
 
-            # Wait a tiny bit to ensure updates are complete
-            import time
-            time.sleep(0.1)
-
             # Get the rating from the current iteration
-            # The append_critique tool has already stored it properly in iterations
             rating = 0.0
             iterations = current_session.state.get("iterations", [])
             current_iteration = current_session.state.get("current_iteration", 1)
@@ -189,70 +233,23 @@ class STAROrchestrator(BaseAgent):
             for iter_data in iterations:
                 if iter_data.get("iteration") == current_iteration:
                     critique = iter_data.get("critique", {})
-                    if isinstance(critique, dict):
-                        rating = float(critique.get("rating", 0.0))
+                    rating = float(critique.get("rating", 0.0))
                     logger.info(f"[{self.name}] Retrieved rating {rating} from iteration {current_iteration}")
                     break
 
-            # Get the highest rated iteration information directly from iterations
-            iterations = ctx.session.state.get("iterations", [])
-            highest_rating = 0.0
-            highest_rated_iter = 0
-
-            # Calculate highest rating directly from iterations
-            for iter_entry in iterations:
-                iter_rating = 0.0
-                if "rating" in iter_entry:
-                    try:
-                        iter_rating = float(iter_entry["rating"])
-                    except (ValueError, TypeError):
-                        continue
-
-                # Also check in critique
-                critique = iter_entry.get("critique", {})
-                if isinstance(critique, dict) and "rating" in critique:
-                    try:
-                        critique_rating = float(critique["rating"])
-                        if critique_rating > iter_rating:
-                            iter_rating = critique_rating
-                    except (ValueError, TypeError):
-                        pass
-
-                # Update highest_rating if this iteration has a higher rating
-                if iter_rating > highest_rating:
-                    highest_rating = iter_rating
-                    highest_rated_iter = iter_entry.get("iteration", 0)
-
-            # Compare with what's stored in state
-            state_highest_rating = ctx.session.state.get("highest_rating", 0.0)
-            state_highest_iter = ctx.session.state.get("highest_rated_iteration", 0)
-
-            logger.info(f"[{self.name}] State highest rating: {state_highest_rating} from iteration {state_highest_iter}")
-            logger.info(f"[{self.name}] Calculated highest rating: {highest_rating} from iteration {highest_rated_iter}")
-
-            # Use the maximum rating between all sources
-            if state_highest_rating > highest_rating:
-                highest_rating = state_highest_rating
-                highest_rated_iter = state_highest_iter
-
-            # Check if current iteration rating is better than what we found
-            for iter_entry in iterations:
-                if iter_entry.get("iteration") == iteration:
-                    iter_rating = iter_entry.get("rating")
-                    if iter_rating and float(iter_rating) > rating:
-                        rating = float(iter_rating)
-                        logger.info(f"[{self.name}] Found better rating {rating} for current iteration")
-
             final_rating = rating
-            logger.info(f"[{self.name}] Critique rating: {rating}")
+            highest_rating = current_session.state.get("highest_rating", 0.0)
+            logger.info(f"[{self.name}] Critique rating: {rating}, highest rating: {highest_rating}")
+            # Note: highest_rating and highest_rated_iteration are managed by append_critique tool
             
             # Update iteration state
             # Use state delta to ensure atomic updates
             update_iteration_info(ctx, iteration)
             
-            # Use the maximum of current rating and highest rating for threshold check
-            threshold_check_rating = max(rating, highest_rating)
-            logger.info(f"[{self.name}] Using rating {threshold_check_rating} for threshold check")
+            # Use the current rating for threshold check
+            threshold_check_rating = rating
+            logger.info(f"[{self.name}] Current rating: {rating}, Highest rating: {highest_rating}")
+            logger.info(f"[{self.name}] Using rating {threshold_check_rating} for threshold check (threshold: {self.rating_threshold})")
 
             # Check if rating meets threshold to skip refinement
             if threshold_check_rating >= self.rating_threshold:
@@ -263,25 +260,43 @@ class STAROrchestrator(BaseAgent):
                     state_delta = {
                         "final_status": "COMPLETED_HIGH_RATING",
                         "final_rating": rating,
-                        "highest_rated_iteration": iteration
+                        "current_iteration": iteration  # Don't increment, we're done
                     }
                     ctx.actions.state_delta = state_delta
                 else:
                     # Direct state updates as fallback
                     ctx.session.state["final_status"] = "COMPLETED_HIGH_RATING"
                     ctx.session.state["final_rating"] = rating
-                    ctx.session.state["highest_rated_iteration"] = iteration
+                    ctx.session.state["current_iteration"] = iteration  # Don't increment
 
                 # Break the loop to skip refinement
                 break
             
             # Rating is below threshold, run refiner
             logger.info(f"[{self.name}] Rating {threshold_check_rating} is below threshold {self.rating_threshold}. Running refiner...")
-            async for event in self.star_refiner.run_async(ctx):
-                # Log event information for debugging
-                logger.info(f"[{self.name}] Event from star_refiner: {event.author} (has_content={event.content is not None})")
-                # Forward events from the star_refiner
-                yield event
+            try:
+                async for event in self.star_refiner.run_async(ctx):
+                    # Log event information for debugging
+                    logger.info(f"[{self.name}] Event from star_refiner: {event.author} (has_content={event.content is not None})")
+                    # Forward events from the star_refiner
+                    yield event
+            except Exception as e:
+                logger.error(f"[{self.name}] Star refiner failed: {e}")
+                # Update state with error status
+                if hasattr(ctx, 'actions') and hasattr(ctx.actions, 'state_delta'):
+                    state_delta = {
+                        "final_status": "ERROR_AGENT_PROCESSING",
+                        "error_message": f"Star refiner failed: {str(e)}"
+                    }
+                    ctx.actions.state_delta = state_delta
+                else:
+                    ctx.session.state["final_status"] = "ERROR_AGENT_PROCESSING"
+                    ctx.session.state["error_message"] = f"Star refiner failed: {str(e)}"
+
+                # Run output retriever to format error
+                async for event in self.output_retriever.run_async(ctx):
+                    yield event
+                return
             
             # Update iteration counter
             iteration += 1

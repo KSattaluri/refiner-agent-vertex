@@ -6,14 +6,12 @@ This agent collects the required inputs for generating a STAR format answer.
 
 from google.adk.agents.llm_agent import LlmAgent
 from .tools import collect_star_inputs
-
-# Constants
-GEMINI_MODEL = "gemini-2.0-flash"
+from ...config import INPUT_COLLECTOR_MODEL
 
 # Define the Input Collector Agent
 input_collector = LlmAgent(
     name="InputCollector",
-    model=GEMINI_MODEL,
+    model=INPUT_COLLECTOR_MODEL,
     instruction="""
     You are an Input Collection Assistant for STAR format interview answers.
 

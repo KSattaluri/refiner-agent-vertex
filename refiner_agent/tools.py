@@ -178,22 +178,24 @@ def append_critique(tool_context: ToolContext, input_key: str = "critique_feedba
         if iteration.get("iteration") == current_iter:
             iteration["critique"] = critique_obj
             iteration["rating"] = critique_obj.get("rating", 0.0)
+            print(f"[TOOLS DEBUG] Updated iteration {current_iter} with critique")
+            print(f"[TOOLS DEBUG] Iteration has answer: {'answer' in iteration}")
+            print(f"[TOOLS DEBUG] Iteration keys: {list(iteration.keys())}")
             break
     
-    # Update highest rating if needed
+    # Build the base state delta
+    state_delta = {
+        "iterations": iterations,
+        "critique_feedback": critique_obj
+    }
+
+    # Update highest rating if this is a new high score
     rating = critique_obj.get("rating", 0.0)
     if rating > tool_context.state.get("highest_rating", 0.0):
-        state_delta = {
-            "iterations": iterations,
-            "critique_feedback": critique_obj,
+        state_delta.update({
             "highest_rating": rating,
             "highest_rated_iteration": current_iter
-        }
-    else:
-        state_delta = {
-            "iterations": iterations,
-            "critique_feedback": critique_obj
-        }
+        })
     
     if hasattr(tool_context, 'actions') and hasattr(tool_context.actions, 'state_delta'):
         tool_context.actions.state_delta = state_delta
@@ -219,26 +221,60 @@ def retrieve_final_output_from_state(tool_context: ToolContext) -> Dict[str, Any
     """
     # Build the output structure
     iterations = tool_context.state.get("iterations", [])
-    
+
+    # Debug logging to see what's in iterations and state
+    print(f"[TOOLS DEBUG] ===== TOOL CONTEXT DEBUG =====")
+    print(f"[TOOLS DEBUG] tool_context type: {type(tool_context)}")
+    print(f"[TOOLS DEBUG] tool_context.state type: {type(tool_context.state)}")
+    print(f"[TOOLS DEBUG] Raw iterations: {len(iterations)}")
+    print(f"[TOOLS DEBUG] Current state keys: {list(tool_context.state.keys())}")
+
+    if iterations:
+        print(f"[TOOLS DEBUG] First iteration type: {type(iterations[0])}")
+        print(f"[TOOLS DEBUG] First iteration keys: {list(iterations[0].keys()) if isinstance(iterations[0], dict) else 'Not a dict'}")
+        if isinstance(iterations[0], dict):
+            print(f"[TOOLS DEBUG] First iteration: {iterations[0]}")
+
+    # Check if there's a session object with events
+    if hasattr(tool_context, 'session'):
+        print(f"[TOOLS DEBUG] tool_context has session attribute")
+        if hasattr(tool_context.session, 'events'):
+            print(f"[TOOLS DEBUG] Session has events: {len(tool_context.session.events)}")
+
+    print(f"[TOOLS DEBUG] ===== END DEBUG =====")
+
     # Format the answer and history
     final_answer = None
     history = []
     final_rating = 0.0
-    
+
     # Process iterations to build history
     for iter_data in iterations:
         answer = iter_data.get("answer", {})
         critique = iter_data.get("critique", {})
-        
+
+        # Build proper critique object with all fields
+        critique_obj = {
+            "rating": critique.get("rating", 0.0),
+            "suggestions": critique.get("suggestions", [])
+        }
+
+        # Include all feedback fields if present
+        if "structure_feedback" in critique:
+            critique_obj["structure_feedback"] = critique["structure_feedback"]
+        if "relevance_feedback" in critique:
+            critique_obj["relevance_feedback"] = critique["relevance_feedback"]
+        if "specificity_feedback" in critique:
+            critique_obj["specificity_feedback"] = critique["specificity_feedback"]
+        if "professional_impact_feedback" in critique:
+            critique_obj["professional_impact_feedback"] = critique["professional_impact_feedback"]
+
         history_item = {
             "answer": answer,
-            "critique": {
-                "rating": critique.get("rating", 0.0),
-                "suggestions": critique.get("suggestions", [])
-            }
+            "critique": critique_obj
         }
         history.append(history_item)
-        
+
         # Track the highest rating
         if critique.get("rating", 0.0) > final_rating:
             final_rating = critique.get("rating", 0.0)
@@ -258,9 +294,25 @@ def retrieve_final_output_from_state(tool_context: ToolContext) -> Dict[str, Any
         "history": history,
         "rating": final_rating
     }
-    
-    return {
+
+    # Debug logging
+    print(f"[TOOLS DEBUG] Iterations from state: {len(iterations)}")
+    print(f"[TOOLS DEBUG] History built: {len(history)}")
+    if history:
+        print(f"[TOOLS DEBUG] First history item keys: {list(history[0].keys())}")
+        print(f"[TOOLS DEBUG] Full history item 0: {history[0]}")
+        print(f"[TOOLS DEBUG] First iteration from state: {iterations[0] if iterations else 'No iterations'}")
+
+    result = {
         "status": "success",
         "message": f"Retrieved output with {len(history)} iterations",
         "retrieved_output": output
     }
+
+    print(f"[TOOLS DEBUG] Returning result with keys: {list(result.keys())}")
+    print(f"[TOOLS DEBUG] retrieved_output keys: {list(result['retrieved_output'].keys())}")
+    print(f"[TOOLS DEBUG] retrieved_output history length: {len(result['retrieved_output'].get('history', []))}")
+    if result['retrieved_output'].get('history'):
+        print(f"[TOOLS DEBUG] First history item in output: {result['retrieved_output']['history'][0]}")
+
+    return result

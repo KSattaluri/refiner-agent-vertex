@@ -6,14 +6,12 @@ This agent evaluates STAR format answers for quality and provides feedback.
 
 from google.adk.agents.llm_agent import LlmAgent
 from ...tools import rate_star_answer
-
-# Constants
-GEMINI_MODEL = "gemini-2.0-flash"
+from ...config import STAR_CRITIQUE_MODEL
 
 # Define the STAR Answer Critique Agent
 star_critique = LlmAgent(
     name="STARAnswerCritic",
-    model=GEMINI_MODEL,
+    model=STAR_CRITIQUE_MODEL,
     instruction="""You are a STAR Answer Quality Evaluator with EXCEPTIONALLY HIGH STANDARDS.
 
     Your task is to rigorously evaluate the quality of a STAR format interview answer and provide a stringent rating and detailed feedback.

@@ -5,14 +5,12 @@ This agent refines STAR format answers based on critique feedback.
 """
 
 from google.adk.agents.llm_agent import LlmAgent
-
-# Constants
-GEMINI_MODEL = "gemini-2.0-flash"
+from ...config import STAR_REFINER_MODEL
 
 # Define the STAR Answer Refiner Agent
 star_refiner = LlmAgent(
     name="STARAnswerRefiner",
-    model=GEMINI_MODEL,
+    model=STAR_REFINER_MODEL,
     instruction="""You are a STAR Answer Refiner specializing in improving interview responses.
 
     Your task is to refine a STAR format answer based on professional critique feedback. Your final output MUST be a JSON object.

@@ -61,10 +61,88 @@ app = Flask(__name__)
 # Set a secret key for Flask session management
 app.secret_key = os.urandom(24)
 
+def update_session_state(session, request_details, default_status="IN_PROGRESS"):
+    """
+    Updates session state with request details and default status.
+
+    Args:
+        session: The session object to update
+        request_details: Dictionary containing request details
+        default_status: Default status to set
+    """
+    # Update session state with request details
+    for key, value in request_details.items():
+        session.state[key] = value
+
+    # Set default status
+    session.state["final_status"] = default_status
+
+    return session
+
+def get_or_create_session(agent_session_id, user_id_for_agent, request_details, flask_session):
+    """
+    Gets an existing session or creates a new one with the provided request details.
+
+    Args:
+        agent_session_id: Existing session ID (may be None)
+        user_id_for_agent: User identifier for the agent
+        request_details: Dictionary containing request details
+        flask_session: Flask session object for storing IDs
+
+    Returns:
+        Session object
+    """
+    session = None
+
+    if not agent_session_id:
+        # Create new session
+        app.logger.info(f"Creating new agent session for user: {user_id_for_agent}")
+        new_session_id = str(uuid.uuid4())
+
+        # Create initial state with request details
+        initial_state = request_details.copy()
+        initial_state["final_status"] = "IN_PROGRESS"
+
+        # Create session
+        session = session_service.create_session(
+            app_name=APP_NAME,
+            user_id=user_id_for_agent,
+            session_id=new_session_id,
+            state=initial_state
+        )
+
+        # Store session info in Flask session
+        flask_session['agent_session_id'] = session.id
+        flask_session['user_id_for_agent'] = user_id_for_agent
+
+        app.logger.info(f"Created session with ID: {session.id}")
+    else:
+        # Get existing session
+        session = session_service.get_session(
+            app_name=APP_NAME,
+            user_id=user_id_for_agent,
+            session_id=agent_session_id
+        )
+
+        # Update session state
+        update_session_state(session, request_details)
+
+        app.logger.info(f"Updated existing session {agent_session_id} with new request details")
+
+    return session
+
 # Configure logging
 import logging
-logging.basicConfig(level=logging.WARNING)
-app.logger.setLevel(logging.WARNING)
+
+# Get logging level from environment, default to INFO for development
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
+logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO))
+
+# Set Flask app logging level based on environment
+if os.getenv('FLASK_ENV') == 'production':
+    app.logger.setLevel(logging.WARNING)
+else:
+    app.logger.setLevel(logging.INFO)
 
 # Suppress verbose Google ADK and related library logging
 logging.getLogger('google.adk').setLevel(logging.WARNING)
@@ -217,53 +295,17 @@ def chat_with_agent(validated_data: STARGeneratorRequest):
     agent_session_id = flask_session.get('agent_session_id')
     user_id_for_agent = flask_session.get('user_id_for_agent', 'web_user_' + os.urandom(8).hex())
 
-    # Create or get session and set initial state
-    session = None
-    if not agent_session_id:
-        try:
-            app.logger.info(f"Creating new agent session for user: {user_id_for_agent}")
-            # Generate a unique session ID if needed
-            new_session_id = str(uuid.uuid4())
-
-            # Add status to request details
-            initial_state = request_details.copy()
-            initial_state["final_status"] = "IN_PROGRESS"
-
-            # Create session with initial state
-            session = session_service.create_session(
-                app_name=APP_NAME,
-                user_id=user_id_for_agent,
-                session_id=new_session_id,
-                state=initial_state  # Set initial state with request details
-            )
-            agent_session_id = session.id
-            flask_session['agent_session_id'] = agent_session_id
-            flask_session['user_id_for_agent'] = user_id_for_agent
-
-            app.logger.info(f"Created session with ID: {agent_session_id}")
-        except Exception as e:
-            app.logger.error(f"Error creating agent session: {e}")
-            return jsonify({"error": f"Could not create agent session: {e}"}), 500
-    else:
-        try:
-            # Get existing session
-            session = session_service.get_session(
-                app_name=APP_NAME,
-                user_id=user_id_for_agent,
-                session_id=agent_session_id
-            )
-
-            # Update session state with new request details
-            for key, value in request_details.items():
-                session.state[key] = value
-
-            # Set default status
-            session.state["final_status"] = "IN_PROGRESS"
-
-            app.logger.info(f"Updated existing session {agent_session_id} with new request details")
-        except Exception as e:
-            app.logger.error(f"Error retrieving session: {e}")
-            return jsonify({"error": f"Could not retrieve session: {e}"}), 500
+    try:
+        session = get_or_create_session(
+            agent_session_id,
+            user_id_for_agent,
+            request_details,
+            flask_session
+        )
+        agent_session_id = session.id
+    except Exception as e:
+        app.logger.error(f"Error managing agent session: {e}")
+        return jsonify({"error": f"Could not manage agent session: {e}"}), 500
 
     # Send query to agent
     app.logger.info(f"Using agent session ID: {agent_session_id} for user: {user_id_for_agent}")
@@ -294,29 +336,63 @@ def chat_with_agent(validated_data: STARGeneratorRequest):
         # Add a timestamp to each event for history ordering (without verbose logging)
         for i, event in enumerate(all_events):
             if not hasattr(event, "timestamp"):
-                setattr(event, "timestamp", f"2025-05-18T{4+i:02d}:{i%60:02d}:00Z")  # Add timestamps for ordering
+                setattr(event, "timestamp", datetime.datetime.now().isoformat())
 
         # Look for final output in events
-        for event in all_events:
+        for i, event in enumerate(all_events):
+            # Debug all final responses
+            if event.is_final_response():
+                print(f"[DEBUG] Final response event {i} from {event.author}")
+
             # Check for FinalOutputRetrieverAgent response
             if event.author == 'FinalOutputRetrieverAgent' and event.is_final_response():
                 if event.content and event.content.parts:
                     for part in event.content.parts:
                         if hasattr(part, 'text') and part.text:
+                            print(f"[DEBUG] Raw text from FinalOutputRetrieverAgent: {part.text[:500]}...")
+
                             # Clean up markdown code blocks
                             cleaned_text = _clean_json_string(part.text)
 
                             try:
+                                # Try to fix common JSON issues before parsing
+                                if cleaned_text.count('{') > cleaned_text.count('}'):
+                                    # Add missing closing braces
+                                    cleaned_text += '}' * (cleaned_text.count('{') - cleaned_text.count('}'))
+                                elif cleaned_text.count('[') > cleaned_text.count(']'):
+                                    # Add missing closing brackets
+                                    cleaned_text += ']' * (cleaned_text.count('[') - cleaned_text.count(']'))
+
+                                # Remove trailing commas before closing braces/brackets
+                                import re
+                                cleaned_text = re.sub(r',\s*}', '}', cleaned_text)
+                                cleaned_text = re.sub(r',\s*]', ']', cleaned_text)
+
                                 # Parse the JSON content
                                 json_data = json.loads(cleaned_text)
-                                if 'retrieved_output' in json_data:
-                                    processed_final_output_dict = json_data['retrieved_output']
-                                    print(f"\n[DEBUG] Retrieved output from FinalOutputRetrieverAgent")
+                                print(f"[DEBUG] Parsed JSON keys: {list(json_data.keys())}")
 
-                                    # Add detailed debugging for iteration history
-                                    if 'history' in processed_final_output_dict:
-                                        iterations = processed_final_output_dict.get('history', [])
-                                        print(f"[DEBUG] Found {len(iterations)} iterations in 'history'")
+                                # The agent should output the data directly now
+                                processed_final_output_dict = json_data
+                                print(f"\n[DEBUG] Retrieved output from FinalOutputRetrieverAgent")
+                                print(f"[DEBUG] JSON data keys: {list(json_data.keys())}")
+                                print(f"[DEBUG] JSON data type: {type(json_data)}")
+
+                                # Add detailed debugging for iteration history
+                                if 'history' in processed_final_output_dict:
+                                    iterations = processed_final_output_dict.get('history', [])
+                                    print(f"[DEBUG] Found {len(iterations)} iterations in 'history'")
+                                    if iterations:
+                                        print(f"[DEBUG] Type of first history item: {type(iterations[0])}")
+                                        if isinstance(iterations[0], dict):
+                                            print(f"[DEBUG] First history item keys: {list(iterations[0].keys())}")
+                                            print(f"[DEBUG] Full first history item: {iterations[0]}")
+
+                                        # Check ratings in history
+                                        for idx, item in enumerate(iterations):
+                                            if isinstance(item, dict) and 'critique' in item:
+                                                rating = item['critique'].get('rating', 0)
+                                                print(f"[DEBUG] Iteration {idx+1} rating: {rating}")
                                     elif 'all_iterations' in processed_final_output_dict:
                                         iterations = processed_final_output_dict.get('all_iterations', [])
                                         print(f"[DEBUG] Found {len(iterations)} iterations in 'all_iterations'")
@@ -329,7 +405,17 @@ def chat_with_agent(validated_data: STARGeneratorRequest):
 
                                     raw_agent_text_response = None
                                     break
-                            except json.JSONDecodeError:
+                                else:
+                                    print(f"[DEBUG] No 'retrieved_output' in JSON, using full data")
+                                    processed_final_output_dict = json_data
+                                    raw_agent_text_response = None
+                                    break
+                            except json.JSONDecodeError as e:
+                                print(f"[DEBUG] JSON decode error: {e}")
+                                print(f"[DEBUG] Cleaned text length: {len(cleaned_text)}")
+                                print(f"[DEBUG] First 200 chars: {cleaned_text[:200]}")
+                                print(f"[DEBUG] Last 200 chars: {cleaned_text[-200:]}")
+                                # Save the raw text for later parsing attempts
                                 raw_agent_text_response = part.text
 
             # General final response handling
@@ -353,21 +439,38 @@ def chat_with_agent(validated_data: STARGeneratorRequest):
 
         # Format and return the response
         if processed_final_output_dict:
-            # No need to check format - we always use the simple formatter
+            # Debug logging
+            app.logger.info(f"[DEBUG] Keys in processed_final_output_dict: {list(processed_final_output_dict.keys())}")
+            if 'history' in processed_final_output_dict:
+                app.logger.info(f"[DEBUG] History length: {len(processed_final_output_dict['history'])}")
+                if processed_final_output_dict['history']:
+                    app.logger.info(f"[DEBUG] First history item keys: {list(processed_final_output_dict['history'][0].keys())}")
 
             # Use the simple formatter for a clean, reliable approach
             formatted_response = format_simple_response(processed_final_output_dict)
 
-            # Debugging information is now hidden in production mode
+            # Debug the formatted response
+            app.logger.info(f"[DEBUG] Formatted response history length: {len(formatted_response.get('history', []))}")
 
             # Validate the response against our schema
             try:
                 validated_response = validate_response(formatted_response, STARGeneratorResponse)
+                app.logger.info(f"[DEBUG] Validated response history length: {len(validated_response.get('history', []))}")
                 return jsonify(validated_response)
             except Exception as e:
                 app.logger.error(f"Response validation error: {str(e)}")
-                # Still return the response, but log the error
-                return jsonify(formatted_response)
+                # Log the formatted response that failed validation
+                app.logger.error(f"[DEBUG] Formatted response that failed validation: {json.dumps(formatted_response, indent=2)}")
+                error_response = {
+                    "star_answer": None,
+                    "feedback": None,
+                    "history": [],
+                    "metadata": {
+                        "status": "ERROR_RESPONSE_VALIDATION",
+                        "error_message": f"Response validation failed: {str(e)}"
+                    }
+                }
+                return jsonify(error_response), 500
 
         elif raw_agent_text_response:
             # Try to parse raw text response as structured output
@@ -396,8 +499,16 @@ def chat_with_agent(validated_data: STARGeneratorRequest):
                     return jsonify(validated_response)
                 except Exception as e:
                     app.logger.error(f"Response validation error: {str(e)}")
-                    # Still return the formatted response, but log the error
-                    return jsonify(formatted_response)
+                    error_response = {
+                        "star_answer": None,
+                        "feedback": None,
+                        "history": [],
+                        "metadata": {
+                            "status": "ERROR_RESPONSE_VALIDATION",
+                            "error_message": f"Response validation failed: {str(e)}"
+                        }
+                    }
+                    return jsonify(error_response), 500
             except Exception as e:
                 app.logger.error(f"Error parsing agent response: {e}")
 

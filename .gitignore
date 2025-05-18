@@ -3,3 +3,7 @@
 CLIFFNOTES.md
 claude.md
 docs/
+
+# Python
+__pycache__/
+*.pyc

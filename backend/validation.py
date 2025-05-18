@@ -70,7 +70,7 @@ class STARAnswer(BaseModel):
 
 class CritiqueFeedback(BaseModel):
     """Validates the structure of critique feedback."""
-    rating: float = Field(..., ge=0.0, le=5.0, description="Numerical rating from 0.0 to 5.0")
+    rating: float = Field(0.0, ge=0.0, le=5.0, description="Numerical rating from 0.0 to 5.0")
     suggestions: List[str] = Field(default_factory=list, description="Suggestions for improvement")
     structure_feedback: Optional[str] = Field(None, description="Feedback on structure")
     relevance_feedback: Optional[str] = Field(None, description="Feedback on relevance")
@@ -81,7 +81,7 @@ class HistoryItem(BaseModel):
     """Validates a single item in the history of STAR answers and critiques."""
     iteration: int = Field(..., ge=1, description="Iteration number, starting from 1")
     star_answer: Optional[STARAnswer] = Field(None, description="STAR format answer for this iteration")
-    critique: CritiqueFeedback = Field(..., description="Critique feedback for this iteration")
+    critique: Optional[CritiqueFeedback] = Field(None, description="Critique feedback for this iteration")
     timestamp: Optional[str] = Field(None, description="Timestamp when this iteration was created")
 
 class Metadata(BaseModel):

@@ -5,14 +5,12 @@ This agent creates the initial STAR format answer based on user inputs.
 """
 
 from google.adk.agents.llm_agent import LlmAgent
-
-# Constants
-GEMINI_MODEL = "gemini-2.0-flash"
+from ...config import STAR_GENERATOR_MODEL
 
 # Define the STAR Answer Generator Agent
 star_generator = LlmAgent(
     name="STARAnswerGenerator",
-    model=GEMINI_MODEL,
+    model=STAR_GENERATOR_MODEL,
     instruction="""You are a STAR Answer Generator specialized in creating interview responses.
 
     Your task is to generate a professional STAR format answer based on the provided information.

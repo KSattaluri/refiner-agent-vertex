@@ -26,10 +26,18 @@ from .tools import (
 # Import custom orchestrator
 from .orchestrator import STAROrchestrator
 
+# Import configuration
+from .config import (
+    INITIALIZE_AGENT_MODEL,
+    OUTPUT_RETRIEVER_MODEL,
+    RATING_THRESHOLD,
+    MAX_ITERATIONS
+)
+
 # Create a simple history initialization agent
 initialize_agent = Agent(
     name="InitializeHistoryAgent",
-    model="gemini-2.0-flash",
+    model=INITIALIZE_AGENT_MODEL,
     description="Initializes history tracking for STAR responses and critiques",
     tools=[initialize_history]
 )
@@ -150,16 +158,23 @@ star_refiner_with_history = Agent(
 final_output_retriever = LlmAgent(
     name="FinalOutputRetrieverAgent",
     description="Retrieves the final structured output from session state and formats it as the definitive response.",
-    model="gemini-2.0-flash", 
+    model=OUTPUT_RETRIEVER_MODEL,
     tools=[retrieve_final_output_from_state],
-    instruction="""Your sole task is to retrieve the final agent output package from the session state.
-You MUST call the `retrieve_final_output_from_state` tool.
-Then, you MUST output the exact JSON string you receive from the tool, wrapped in markdown ```json ... ``` fences.
-DO NOT add any other explanatory text or conversation. Only the JSON string in markdown.
-The value associated with 'retrieved_output' is a dictionary containing the complete final data (STAR answer, histories, rating).
-You MUST take this 'retrieved_output' dictionary and output it as your final response.
-Your entire output MUST be ONLY this dictionary, formatted as a JSON string, and wrapped in markdown code fences (```json ... ```).
-Do not add any other text, explanations, or conversational filler.""",
+    instruction="""Call the retrieve_final_output_from_state tool and output exactly what it returns in the 'retrieved_output' field.
+
+The tool returns: {"status": "success", "message": "...", "retrieved_output": {...}}
+You must output only the value of 'retrieved_output' as JSON wrapped in markdown fences.
+
+Example:
+```json
+{
+  "answer": {...},
+  "history": [...],
+  "rating": ...
+}
+```
+
+Do not wrap it in {"retrieved_output": ...} - just output the content directly.""",
     output_key="final_structured_output_from_state"
 )
 
@@ -172,6 +187,6 @@ root_agent = STAROrchestrator(
     star_critique=star_critique_with_history,
     star_refiner=star_refiner_with_history,
     output_retriever=final_output_retriever,
-    rating_threshold=4.6,  # Skip refinement when rating is at least 4.6
-    max_iterations=3       # Maximum of 3 refinement iterations
+    rating_threshold=RATING_THRESHOLD,  # Skip refinement when rating is at least this value
+    max_iterations=MAX_ITERATIONS       # Maximum number of refinement iterations
 )
