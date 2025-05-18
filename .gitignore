@@ -1,4 +1,5 @@
 *.env
+!*.env.example
 CLIFFNOTES.md
 claude.md
 docs/
