@@ -8,15 +8,17 @@ with precise control over the refinement process.
 import logging
 import json
 import traceback
+import datetime
 from typing import AsyncGenerator, Optional
 from typing_extensions import override
 
 from google.adk.agents import Agent, BaseAgent, LoopAgent, SequentialAgent
 from google.adk.agents.invocation_context import InvocationContext
-from google.adk.events import Event, EventActions
+from google.adk.events import Event
 from google.genai import types
 
 from .timing import TimingTracker, time_operation
+from .tools import retrieve_final_output_from_state
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -369,42 +371,88 @@ class STAROrchestrator(BaseAgent):
                 logger.warning(f"[{self.name}] critique_feedback_raw is not a string or dict: {type(critique_feedback_raw)}. Raw: {critique_feedback_raw}")
                 critique_details_for_history = {"error": "Critique was not string or dict", "raw": str(critique_feedback_raw)}
 
-            logger.info(f"[{self.name}] Iteration {iteration}: Critique processed, parsed_rating = {parsed_rating}")
-            print(f"[ORCHESTRATOR DEBUG] Parsed rating from critique_feedback: {parsed_rating}")
-            print(f"[ORCHESTRATOR DEBUG] Critique details for history: {critique_details_for_history}")
+            final_rating = rating
 
-            # Store the current iteration's answer, critique, and rating
-            current_star_answer_for_history = ctx.session.state.get("answer") 
+            # --- Start: Retrieve and parse the raw answer string from state ---
+            raw_answer_string_key = self.star_generator.output_key if iteration == 1 else self.star_refiner.output_key
+            raw_answer_string = ctx.session.state.get(raw_answer_string_key)
             
+            parsed_answer_obj = {} # Default in case of issues
+            if isinstance(raw_answer_string, str):
+                cleaned_answer_string = raw_answer_string.strip()
+                # Remove markdown fences if present (e.g., ```json ... ``` or ``` ... ```)
+                if cleaned_answer_string.startswith("```json"):
+                    cleaned_answer_string = cleaned_answer_string[len("```json"):]
+                elif cleaned_answer_string.startswith("```"):
+                    # Attempt to strip ``` and optional language, then the first newline
+                    first_newline_idx = cleaned_answer_string.find('\n')
+                    if first_newline_idx != -1 and first_newline_idx < 20: # Limit lang spec length
+                        cleaned_answer_string = cleaned_answer_string[first_newline_idx+1:]
+                    else: # If no newline or lang spec is too long, just strip ```
+                        cleaned_answer_string = cleaned_answer_string[len("```"):]
+                
+                if cleaned_answer_string.endswith("```"):
+                    cleaned_answer_string = cleaned_answer_string[:-len("```")]
+                
+                cleaned_answer_string = cleaned_answer_string.strip() # Strip again after fence removal
+                
+                if not cleaned_answer_string:
+                    logger.error(f"[{self.name}] Iteration {iteration}: Cleaned answer string from key '{raw_answer_string_key}' is empty after stripping markdown. Raw: '{raw_answer_string[:100]}...'")
+                    parsed_answer_obj = {"error": "Empty answer string after cleaning", "raw_answer_snippet": raw_answer_string[:200]}
+                else:
+                    try:
+                        parsed_answer_obj = json.loads(cleaned_answer_string)
+                    except json.JSONDecodeError as e:
+                        logger.error(f"[{self.name}] Iteration {iteration}: Failed to parse answer string from key '{raw_answer_string_key}'. Error: {e}. Cleaned String: '{cleaned_answer_string[:200]}...' Raw String: '{raw_answer_string[:200]}...'")
+                        parsed_answer_obj = {"error": "Failed to parse answer JSON", "cleaned_answer_snippet": cleaned_answer_string[:200], "raw_answer_snippet": raw_answer_string[:200]}
+            elif isinstance(raw_answer_string, dict):
+                logger.warning(f"[{self.name}] Iteration {iteration}: Answer from key '{raw_answer_string_key}' was already a dict. Using as is, though this is unexpected after removing append_star_response.")
+                parsed_answer_obj = raw_answer_string
+            else:
+                logger.error(f"[{self.name}] Iteration {iteration}: Answer from key '{raw_answer_string_key}' is not a string or dict. Type: {type(raw_answer_string)}. Value: '{str(raw_answer_string)[:200]}'")
+                parsed_answer_obj = {"error": "Unexpected answer type in state", "raw_value_snippet": str(raw_answer_string)[:200]}
+            # --- End: Retrieve and parse the raw answer string ---
+
+            # --- Start: Define iteration_entry and append to full_iteration_history ---
             iteration_entry = {
                 "iteration_number": iteration,
-                "answer": current_star_answer_for_history,
-                "critique": critique_details_for_history, 
-                "rating": rating
+                "answer": parsed_answer_obj,                   # Use the newly parsed answer object
+                "critique": critique_details_for_history,      # Use the critique details parsed earlier
+                "rating": rating,                              # Assumed to be defined from critique processing
+                "timestamp": datetime.datetime.now().isoformat(),
             }
-            
+
             current_history_list = ctx.session.state.get("full_iteration_history", [])
             if not isinstance(current_history_list, list):
-                logger.warning(f"[{self.name}] 'full_iteration_history' was not a list during append. Resetting.")
+                logger.warning(f"[{self.name}] Iteration {iteration}: 'full_iteration_history' in state was not a list. Re-initializing to empty list for history construction.")
                 current_history_list = []
-            
-            new_history_list = current_history_list + [iteration_entry]
+
+            # Initialize new_history_list safely as a copy of current_history_list
+            new_history_list = list(current_history_list) 
+            try:
+                # Attempt to append the current iteration's entry
+                new_history_list.append(iteration_entry)
+            except Exception as e:
+                logger.error(f"[{self.name}] Iteration {iteration}: Failed to append iteration_entry to history. Error: {e}. This iteration's data might be lost from history.")
+                # new_history_list remains as it was before the failed append (i.e., history up to the previous iteration)
+                # Depending on requirements, one might choose to re-raise or handle more explicitly.
 
             if hasattr(ctx, 'actions') and hasattr(ctx.actions, 'state_delta'):
                 ctx.actions.state_delta = {"full_iteration_history": new_history_list}
-                ctx.session.state["full_iteration_history"] = new_history_list
+                ctx.session.state["full_iteration_history"] = new_history_list # Ensure current context sees it too
             else:
                 ctx.session.state["full_iteration_history"] = new_history_list
-            
+
+            # Debug log for the appended item
             logger.info(f"[{self.name}] Added iteration {iteration} details to full_iteration_history.")
-            # Optional: More detailed debug log for the appended item
             if new_history_list:
                 last_entry = new_history_list[-1]
                 print(f"[ORCHESTRATOR DEBUG] Last item in full_iteration_history: iteration_number={last_entry.get('iteration_number')}, rating={last_entry.get('rating')}, answer_keys_present={list(last_entry.get('answer').keys()) if isinstance(last_entry.get('answer'), dict) else type(last_entry.get('answer'))}, critique_keys_present={list(last_entry.get('critique').keys()) if isinstance(last_entry.get('critique'), dict) else type(last_entry.get('critique'))}")
             else:
                 print("[ORCHESTRATOR DEBUG] full_iteration_history is empty after trying to append.")
+            # --- End: Define iteration_entry and append to full_iteration_history ---
 
-            final_rating = rating # Update final_rating with the latest one, to be used for threshold check
+            # Update final_rating with the latest one, to be used for threshold check
             # highest_rating can be updated here if needed, or keep original logic if it's managed elsewhere
             highest_rating = max(ctx.session.state.get("highest_rating", 0.0), final_rating)
             if hasattr(ctx, 'actions') and hasattr(ctx.actions, 'state_delta'):
@@ -504,28 +552,22 @@ class STAROrchestrator(BaseAgent):
         logger.info(f"[{self.name}] Added timing data directly to state before output retriever")
         print(f"[ORCHESTRATOR DEBUG] Added timing_data to state. State type: {type(ctx.session.state)}")
 
-        # Step 6: Retrieve and format final output (now includes timing data)
-        logger.info(f"[{self.name}] Retrieving final output...")
-        with time_operation(self.timing_tracker, "output_retriever"):
-            async for event in self.output_retriever.run_async(ctx):
-                # Log event information for debugging
-                logger.info(f"[{self.name}] Event from output_retriever: {event.author} (has_content={event.content is not None})")
-                # Forward events from the output_retriever
-                yield event
+        # NEW: Prepare the final JSON payload using our Python function
+        logger.info(f"[{self.name}] Calling Python function to prepare final JSON payload for UI...")
+        final_json_string_for_ui = retrieve_final_output_from_state(ctx) # tool_context is ctx here
 
-        # Update timing with output retriever time and log final report
-        final_timing_data = self.timing_tracker.get_timings()
-        if hasattr(ctx, 'actions') and hasattr(ctx.actions, 'state_delta'):
-            ctx.actions.state_delta = {"timing_data": final_timing_data}
-        else:
-            ctx.session.state["timing_data"] = final_timing_data
+        print(f"[ORCHESTRATOR PRE-LOG DEBUG] Type of final_json_string_for_ui: {type(final_json_string_for_ui)}, Len: {len(final_json_string_for_ui) if isinstance(final_json_string_for_ui, str) else 'N/A'}")
+        logger.info(f"[{self.name}] Orchestrator received JSON string from tool (len: {len(final_json_string_for_ui)}). Snippet: {final_json_string_for_ui[:1000]}...")
+        
+        # Yield the final JSON payload directly
+        logger.info(f"[{self.name}] Orchestrator yielding final JSON payload directly (len: {len(final_json_string_for_ui)}). Snippet: {final_json_string_for_ui[:500]}...")
+        yield Event(
+            author=self.name,
+            invocation_id=ctx.invocation_id,
+            content=types.Content(parts=[types.Part(text=final_json_string_for_ui)])
+        )
 
-        # Log timing report
-        from .timing import format_timing_report
-        timing_report = format_timing_report(timing_data)
-        logger.info(f"\n{timing_report}")
-
-        logger.info(f"[{self.name}] STAR workflow completed with status: {ctx.session.state.get('final_status')}")
+        logger.info(f"[{self.name}] STAR Orchestrator finished.")
 
 
 def update_iteration_info(ctx: InvocationContext, current_iteration: int) -> None:
