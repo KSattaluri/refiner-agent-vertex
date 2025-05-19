@@ -25,7 +25,7 @@ def initialize_history(tool_context: ToolContext) -> Dict[str, Any]:
     # Initialize the state with empty lists
     state_delta = {
         "iterations": [],  # Main tracking structure
-        "current_iteration": 0,
+        "current_iteration": 0,  # Will be set to 1 by orchestrator before first STAR generation
         "highest_rated_iteration": 0,
         "highest_rating": 0.0,
         "final_status": "IN_PROGRESS"
@@ -61,9 +61,8 @@ def append_star_response(tool_context: ToolContext, input_key: str = "current_an
     if not response:
         return {"status": "error", "message": "No response to append"}
     
-    # Determine iteration number
-    current_iter = tool_context.state.get("current_iteration", 0)
-    current_iter += 1
+    # Get the current iteration number from state (set by orchestrator)
+    current_iter = tool_context.state.get("current_iteration", 1)
     
     # Parse response if it's a string
     answer_obj = response
@@ -101,10 +100,9 @@ def append_star_response(tool_context: ToolContext, input_key: str = "current_an
     else:
         iterations.append(iteration_data)
     
-    # Update state
+    # Update state (don't change current_iteration, that's managed by orchestrator)
     state_delta = {
         "iterations": iterations,
-        "current_iteration": current_iter,
         "current_answer": answer_obj
     }
     
@@ -150,169 +148,104 @@ def append_critique(tool_context: ToolContext, input_key: str = "critique_feedba
     Returns:
         Success status message
     """
-    # Get critique from state
-    critique = tool_context.state.get(input_key)
-    if not critique:
-        return {"status": "error", "message": "No critique to append"}
-    
-    # Get current iteration
-    current_iter = tool_context.state.get("current_iteration", 1)
-    iterations = tool_context.state.get("iterations", [])
-    
-    # Parse critique if needed
-    critique_obj = critique
-    if isinstance(critique, str):
-        try:
-            # Clean markdown formatting
-            cleaned = critique.strip()
-            if cleaned.startswith("```"):
-                cleaned = cleaned.split("\n", 1)[1]
-            if cleaned.endswith("```"):
-                cleaned = cleaned.rsplit("\n", 1)[0]
-            critique_obj = json.loads(cleaned)
-        except:
-            critique_obj = {"rating": 0.0, "suggestions": ["Unable to parse critique"]}
-    
-    # Update the current iteration with critique
-    for iteration in iterations:
-        if iteration.get("iteration") == current_iter:
-            iteration["critique"] = critique_obj
-            iteration["rating"] = critique_obj.get("rating", 0.0)
-            print(f"[TOOLS DEBUG] Updated iteration {current_iter} with critique")
-            print(f"[TOOLS DEBUG] Iteration has answer: {'answer' in iteration}")
-            print(f"[TOOLS DEBUG] Iteration keys: {list(iteration.keys())}")
-            break
-    
-    # Build the base state delta
-    state_delta = {
-        "iterations": iterations,
-        "critique_feedback": critique_obj
-    }
-
-    # Update highest rating if this is a new high score
-    rating = critique_obj.get("rating", 0.0)
-    if rating > tool_context.state.get("highest_rating", 0.0):
-        state_delta.update({
-            "highest_rating": rating,
-            "highest_rated_iteration": current_iter
-        })
-    
-    if hasattr(tool_context, 'actions') and hasattr(tool_context.actions, 'state_delta'):
-        tool_context.actions.state_delta = state_delta
-    else:
-        for key, value in state_delta.items():
-            tool_context.state[key] = value
-    
-    return {
-        "status": "success",
-        "message": f"Added critique to iteration {current_iter}"
-    }
+    pass
 
 
 def retrieve_final_output_from_state(tool_context: ToolContext) -> Dict[str, Any]:
     """
-    Retrieve and format the final output for the frontend.
-    
+    Retrieve and format the final output for the frontend, using full_iteration_history.
+
     Args:
         tool_context: Context for accessing session state
-        
+
     Returns:
         Formatted output with history and metadata
     """
-    # Build the output structure
-    iterations = tool_context.state.get("iterations", [])
-
-    # Debug logging to see what's in iterations and state
-    print(f"[TOOLS DEBUG] ===== TOOL CONTEXT DEBUG =====")
-    print(f"[TOOLS DEBUG] tool_context type: {type(tool_context)}")
-    print(f"[TOOLS DEBUG] tool_context.state type: {type(tool_context.state)}")
-    print(f"[TOOLS DEBUG] Raw iterations: {len(iterations)}")
-    print(f"[TOOLS DEBUG] Current state keys: {list(tool_context.state.keys())}")
-
-    if iterations:
-        print(f"[TOOLS DEBUG] First iteration type: {type(iterations[0])}")
-        print(f"[TOOLS DEBUG] First iteration keys: {list(iterations[0].keys()) if isinstance(iterations[0], dict) else 'Not a dict'}")
-        if isinstance(iterations[0], dict):
-            print(f"[TOOLS DEBUG] First iteration: {iterations[0]}")
-
-    # Check if there's a session object with events
-    if hasattr(tool_context, 'session'):
-        print(f"[TOOLS DEBUG] tool_context has session attribute")
-        if hasattr(tool_context.session, 'events'):
-            print(f"[TOOLS DEBUG] Session has events: {len(tool_context.session.events)}")
-
-    print(f"[TOOLS DEBUG] ===== END DEBUG =====")
-
-    # Format the answer and history
-    final_answer = None
-    history = []
-    final_rating = 0.0
-
-    # Process iterations to build history
-    for iter_data in iterations:
-        answer = iter_data.get("answer", {})
-        critique = iter_data.get("critique", {})
-
-        # Build proper critique object with all fields
-        critique_obj = {
-            "rating": critique.get("rating", 0.0),
-            "suggestions": critique.get("suggestions", [])
-        }
-
-        # Include all feedback fields if present
-        if "structure_feedback" in critique:
-            critique_obj["structure_feedback"] = critique["structure_feedback"]
-        if "relevance_feedback" in critique:
-            critique_obj["relevance_feedback"] = critique["relevance_feedback"]
-        if "specificity_feedback" in critique:
-            critique_obj["specificity_feedback"] = critique["specificity_feedback"]
-        if "professional_impact_feedback" in critique:
-            critique_obj["professional_impact_feedback"] = critique["professional_impact_feedback"]
-
-        history_item = {
-            "answer": answer,
-            "critique": critique_obj
-        }
-        history.append(history_item)
-
-        # Track the highest rating
-        if critique.get("rating", 0.0) > final_rating:
-            final_rating = critique.get("rating", 0.0)
-            final_answer = answer
+    # Get the new history list populated by the orchestrator
+    # Each item is: {"iteration_number": ..., "answer": {...}, "critique": {...}, "rating": ...}
+    full_iteration_history_from_state = tool_context.state.get("full_iteration_history", [])
     
-    # If no iterations, use current answer
-    if not final_answer and tool_context.state.get("current_answer"):
-        current = tool_context.state.get("current_answer")
-        if isinstance(current, dict):
-            final_answer = current
-        else:
-            final_answer = {"situation": str(current)[:200], "task": "", "action": "", "result": ""}
+    print(f"[TOOLS DEBUG] Found {len(full_iteration_history_from_state)} items in full_iteration_history_from_state")
+
+    final_answer_to_display = None  # The STAR answer from the highest-rated iteration
+    highest_rating_achieved = 0.0
     
-    # Build the response
-    output = {
-        "answer": final_answer or {"situation": "", "task": "", "action": "", "result": ""},
-        "history": history,
-        "rating": final_rating
+    # This will be the 'history' array in the final JSON sent to the frontend
+    # Each item will have: role, industry, question, answer (STAR object), critique (critique object)
+    history_for_frontend = []
+
+    if not full_iteration_history_from_state:
+        # Handle cases where there's no iteration history (e.g., error before first generation)
+        current_ans_direct = tool_context.state.get("current_answer")
+        if isinstance(current_ans_direct, dict):
+            final_answer_to_display = current_ans_direct
+        elif current_ans_direct: # If it's a string or something else
+            final_answer_to_display = {"situation": str(current_ans_direct)[:300], "task": "N/A", "action": "N/A", "result": "N/A"}
+        else: # Default if no answer at all
+            final_answer_to_display = {"situation": "Not available", "task": "Not available", "action": "Not available", "result": "Not available"}
+        # highest_rating_achieved remains 0.0
+
+    else: # Process the full_iteration_history_from_state
+        for iteration_data in full_iteration_history_from_state:
+            iter_answer = iteration_data.get("answer", {})
+            if not isinstance(iter_answer, dict): 
+                iter_answer = {"situation": "Answer data malformed", "task": "", "action": "", "result": ""}
+
+            iter_critique = iteration_data.get("critique", {})
+            if not isinstance(iter_critique, dict): 
+                iter_critique = {"rating": 0.0, "suggestions": ["Critique data malformed"]}
+            
+            # Ensure rating within critique is present, using the top-level 'rating' from iteration_data as primary
+            iter_rating = float(iteration_data.get("rating", iter_critique.get("rating", 0.0)))
+            if "rating" not in iter_critique: # Add rating to critique if not already there from parsing
+                 iter_critique["rating"] = iter_rating
+
+            history_item = {
+                "role": tool_context.state.get("role", "N/A"),
+                "industry": tool_context.state.get("industry", "N/A"),
+                "question": tool_context.state.get("question", "N/A"),
+                "answer": iter_answer,     
+                "critique": iter_critique  
+            }
+            history_for_frontend.append(history_item)
+
+            if iter_rating >= highest_rating_achieved:
+                highest_rating_achieved = iter_rating
+                final_answer_to_display = iter_answer
+        
+        if not final_answer_to_display and history_for_frontend: # Fallback if all ratings were 0
+            final_answer_to_display = history_for_frontend[-1]["answer"]
+
+    if final_answer_to_display is None: # Should only happen if history was empty AND no current_answer
+        final_answer_to_display = {"situation": "No answer available", "task": "", "action": "", "result": ""}
+
+    output_payload = {
+        "answer": final_answer_to_display,
+        "history": history_for_frontend,
+        "rating": highest_rating_achieved 
     }
+    
+    timing_data = tool_context.state.get("timing_data")
+    if timing_data:
+        print(f"[TOOLS DEBUG] Timing data found in state: {timing_data}")
+    else:
+        print(f"[TOOLS DEBUG] No timing data found in state")
 
-    # Debug logging
-    print(f"[TOOLS DEBUG] Iterations from state: {len(iterations)}")
-    print(f"[TOOLS DEBUG] History built: {len(history)}")
-    if history:
-        print(f"[TOOLS DEBUG] First history item keys: {list(history[0].keys())}")
-        print(f"[TOOLS DEBUG] Full history item 0: {history[0]}")
-        print(f"[TOOLS DEBUG] First iteration from state: {iterations[0] if iterations else 'No iterations'}")
+    print(f"[TOOLS DEBUG] History built for frontend output: {len(history_for_frontend)}")
+    if history_for_frontend:
+        first_hist_item = history_for_frontend[0]
+        print(f"[TOOLS DEBUG] First history item for frontend (keys): {list(first_hist_item.keys())}")
+        print(f"[TOOLS DEBUG] First history item answer (keys): {list(first_hist_item.get('answer', {}).keys())}")
+        print(f"[TOOLS DEBUG] First history item critique (keys): {list(first_hist_item.get('critique', {}).keys())}")
 
     result = {
         "status": "success",
-        "message": f"Retrieved output with {len(history)} iterations",
-        "retrieved_output": output
+        "message": f"Retrieved output with {len(history_for_frontend)} history items.",
+        "retrieved_output": output_payload 
     }
 
-    print(f"[TOOLS DEBUG] Returning result with keys: {list(result.keys())}")
-    print(f"[TOOLS DEBUG] retrieved_output keys: {list(result['retrieved_output'].keys())}")
-    print(f"[TOOLS DEBUG] retrieved_output history length: {len(result['retrieved_output'].get('history', []))}")
-    if result['retrieved_output'].get('history'):
-        print(f"[TOOLS DEBUG] First history item in output: {result['retrieved_output']['history'][0]}")
-
+    print(f"[TOOLS DEBUG] Final result being returned by tool (keys): {list(result.keys())}")
+    print(f"[TOOLS DEBUG] Final 'retrieved_output' (keys): {list(result['retrieved_output'].keys())}")
+    print(f"[TOOLS DEBUG] Final 'retrieved_output' history length: {len(result['retrieved_output'].get('history', []))}")
+    
     return result
