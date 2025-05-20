@@ -53,7 +53,6 @@ class STAROrchestrator(BaseAgent):
     star_generator: Agent
     star_critique: Agent
     star_refiner: Agent
-    output_retriever: Agent
 
     # Configuration
     rating_threshold: float
@@ -69,7 +68,6 @@ class STAROrchestrator(BaseAgent):
         star_generator: Agent,
         star_critique: Agent,
         star_refiner: Agent,
-        output_retriever: Agent,
         rating_threshold: float = 4.6,
         max_iterations: int = 3,
     ):
@@ -82,7 +80,6 @@ class STAROrchestrator(BaseAgent):
             star_generator: Agent to generate initial STAR answer
             star_critique: Agent to critique STAR answers
             star_refiner: Agent to refine STAR answers
-            output_retriever: Agent to retrieve and format final output
             rating_threshold: Rating threshold to skip refinement (default: 4.6)
             max_iterations: Maximum refinement iterations (default: 3)
         """
@@ -93,7 +90,6 @@ class STAROrchestrator(BaseAgent):
             star_generator=star_generator,
             star_critique=star_critique,
             star_refiner=star_refiner,
-            output_retriever=output_retriever,
             rating_threshold=rating_threshold,
             max_iterations=max_iterations,
             timing_tracker=TimingTracker(),
@@ -101,8 +97,7 @@ class STAROrchestrator(BaseAgent):
                 input_collector,
                 star_generator,
                 star_critique,
-                star_refiner,
-                output_retriever
+                star_refiner
             ],
             description="Custom orchestrator for STAR format answer generation with conditional refinement",
         )
@@ -168,23 +163,23 @@ class STAROrchestrator(BaseAgent):
         if not ctx.session.state.get("role") or not ctx.session.state.get("industry") or not ctx.session.state.get("question"):
             logger.error(f"[{self.name}] Missing required inputs. Aborting workflow.")
 
-            # Update state with error status using state_delta when available
-            if hasattr(ctx, 'actions') and hasattr(ctx.actions, 'state_delta'):
-                state_delta = {
-                    "final_status": "ERROR_INPUT_VALIDATION",
-                    "error_message": "Missing required inputs: role, industry, or question"
-                }
-                ctx.actions.state_delta = state_delta
-            else:
-                # Direct state updates as fallback
-                ctx.session.state["final_status"] = "ERROR_INPUT_VALIDATION"
-                ctx.session.state["error_message"] = "Missing required inputs: role, industry, or question"
-
-            # Run output_retriever to get formatted error information
-            logger.info(f"[{self.name}] Retrieving error output...")
-            async for event in self.output_retriever.run_async(ctx):
-                yield event
-
+            # Directly prepare and yield final error output
+            error_payload = self.prepare_final_json_for_ui(
+                full_history=ctx.session.state.get("full_iteration_history", []),
+                final_status=ctx.session.state.get("final_status", "ERROR_INPUT_VALIDATION"),
+                final_answer=None, # No successful answer
+                final_rating=0.0,
+                highest_rated_iteration_num=ctx.session.state.get("highest_rated_iteration", 0),
+                timing_data=self.timing_tracker.get_all_timings(),
+                error_message=ctx.session.state.get("error_message")
+            )
+            logger.info(f"[{self.name}] Yielding final error output directly.")
+            yield Event(
+                author=self.name,
+                invocation_id=ctx.invocation_id,
+                content=types.Content(parts=[types.Part(text=error_payload)]),
+                is_final_response=True
+            )
             return
         
         # Step 3: Generate initial STAR answer
@@ -205,20 +200,23 @@ class STAROrchestrator(BaseAgent):
                     yield event
         except Exception as e:
             logger.error(f"[{self.name}] Star generator failed: {e}")
-            # Update state with error status
-            if hasattr(ctx, 'actions') and hasattr(ctx.actions, 'state_delta'):
-                state_delta = {
-                    "final_status": "ERROR_AGENT_PROCESSING",
-                    "error_message": f"Star generator failed: {str(e)}"
-                }
-                ctx.actions.state_delta = state_delta
-            else:
-                ctx.session.state["final_status"] = "ERROR_AGENT_PROCESSING"
-                ctx.session.state["error_message"] = f"Star generator failed: {str(e)}"
-
-            # Run output retriever to format error
-            async for event in self.output_retriever.run_async(ctx):
-                yield event
+            # Directly prepare and yield final error output
+            error_payload = self.prepare_final_json_for_ui(
+                full_history=ctx.session.state.get("full_iteration_history", []),
+                final_status=ctx.session.state.get("final_status", "ERROR_AGENT_PROCESSING"),
+                final_answer=None, # No successful answer
+                final_rating=0.0,
+                highest_rated_iteration_num=ctx.session.state.get("highest_rated_iteration", 0),
+                timing_data=self.timing_tracker.get_all_timings(),
+                error_message=ctx.session.state.get("error_message")
+            )
+            logger.info(f"[{self.name}] Yielding final error output directly after agent failure.")
+            yield Event(
+                author=self.name,
+                invocation_id=ctx.invocation_id,
+                content=types.Content(parts=[types.Part(text=error_payload)]),
+                is_final_response=True
+            )
             return
 
         # Step 4: Iterative refinement loop with conditional execution
@@ -239,20 +237,23 @@ class STAROrchestrator(BaseAgent):
                         yield event
             except Exception as e:
                 logger.error(f"[{self.name}] Star critique failed: {e}")
-                # Update state with error status
-                if hasattr(ctx, 'actions') and hasattr(ctx.actions, 'state_delta'):
-                    state_delta = {
-                        "final_status": "ERROR_AGENT_PROCESSING",
-                        "error_message": f"Star critique failed: {str(e)}"
-                    }
-                    ctx.actions.state_delta = state_delta
-                else:
-                    ctx.session.state["final_status"] = "ERROR_AGENT_PROCESSING"
-                    ctx.session.state["error_message"] = f"Star critique failed: {str(e)}"
-
-                # Run output retriever to format error
-                async for event in self.output_retriever.run_async(ctx):
-                    yield event
+                # Directly prepare and yield final error output
+                error_payload = self.prepare_final_json_for_ui(
+                    full_history=ctx.session.state.get("full_iteration_history", []),
+                    final_status=ctx.session.state.get("final_status", "ERROR_AGENT_PROCESSING"),
+                    final_answer=None, # No successful answer
+                    final_rating=0.0,
+                    highest_rated_iteration_num=ctx.session.state.get("highest_rated_iteration", 0),
+                    timing_data=self.timing_tracker.get_all_timings(),
+                    error_message=ctx.session.state.get("error_message")
+                )
+                logger.info(f"[{self.name}] Yielding final error output directly after agent failure.")
+                yield Event(
+                    author=self.name,
+                    invocation_id=ctx.invocation_id,
+                    content=types.Content(parts=[types.Part(text=error_payload)]),
+                    is_final_response=True
+                )
                 return
             
             # Get the latest state after critique agent has finished
@@ -417,20 +418,23 @@ class STAROrchestrator(BaseAgent):
                         yield event
             except Exception as e:
                 logger.error(f"[{self.name}] Star refiner failed: {e}")
-                # Update state with error status
-                if hasattr(ctx, 'actions') and hasattr(ctx.actions, 'state_delta'):
-                    state_delta = {
-                        "final_status": "ERROR_AGENT_PROCESSING",
-                        "error_message": f"Star refiner failed: {str(e)}"
-                    }
-                    ctx.actions.state_delta = state_delta
-                else:
-                    ctx.session.state["final_status"] = "ERROR_AGENT_PROCESSING"
-                    ctx.session.state["error_message"] = f"Star refiner failed: {str(e)}"
-
-                # Run output retriever to format error
-                async for event in self.output_retriever.run_async(ctx):
-                    yield event
+                # Directly prepare and yield final error output
+                error_payload = self.prepare_final_json_for_ui(
+                    full_history=ctx.session.state.get("full_iteration_history", []),
+                    final_status=ctx.session.state.get("final_status", "ERROR_AGENT_PROCESSING"),
+                    final_answer=None, # No successful answer
+                    final_rating=0.0,
+                    highest_rated_iteration_num=ctx.session.state.get("highest_rated_iteration", 0),
+                    timing_data=self.timing_tracker.get_all_timings(),
+                    error_message=ctx.session.state.get("error_message")
+                )
+                logger.info(f"[{self.name}] Yielding final error output directly after agent failure.")
+                yield Event(
+                    author=self.name,
+                    invocation_id=ctx.invocation_id,
+                    content=types.Content(parts=[types.Part(text=error_payload)]),
+                    is_final_response=True
+                )
                 return
         
         # Check if we finished due to max iterations
