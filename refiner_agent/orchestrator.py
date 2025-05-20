@@ -19,6 +19,7 @@ from google.genai import types
 
 from .timing import TimingTracker, time_operation
 from .tools import retrieve_final_output_from_state
+from .parsing_utils import parse_llm_json_output, parse_critique_feedback, parse_star_answer
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -48,24 +49,22 @@ class STAROrchestrator(BaseAgent):
     """
     
     # Field declarations for Pydantic
-    initialize_agent: Agent
     input_collector: Agent
     star_generator: Agent
     star_critique: Agent
     star_refiner: Agent
     output_retriever: Agent
-    
+
     # Configuration
     rating_threshold: float
     max_iterations: int
     timing_tracker: TimingTracker
 
     model_config = {"arbitrary_types_allowed": True}
-    
+
     def __init__(
         self,
         name: str,
-        initialize_agent: Agent,
         input_collector: Agent,
         star_generator: Agent,
         star_critique: Agent,
@@ -76,10 +75,9 @@ class STAROrchestrator(BaseAgent):
     ):
         """
         Initialize the STAR Orchestrator agent.
-        
+
         Args:
             name: Name of the agent
-            initialize_agent: Agent to initialize history
             input_collector: Agent to collect user inputs
             star_generator: Agent to generate initial STAR answer
             star_critique: Agent to critique STAR answers
@@ -91,7 +89,6 @@ class STAROrchestrator(BaseAgent):
         # Store all sub-agents
         super().__init__(
             name=name,
-            initialize_agent=initialize_agent,
             input_collector=input_collector,
             star_generator=star_generator,
             star_critique=star_critique,
@@ -101,7 +98,6 @@ class STAROrchestrator(BaseAgent):
             max_iterations=max_iterations,
             timing_tracker=TimingTracker(),
             sub_agents=[
-                initialize_agent,
                 input_collector,
                 star_generator,
                 star_critique,
@@ -134,47 +130,30 @@ class STAROrchestrator(BaseAgent):
         self.timing_tracker.reset()  # Reset timing for new request
         self.timing_tracker.start("total_workflow")
 
-        # Initialize full_iteration_history in state if it doesn't exist
-        if "full_iteration_history" not in ctx.session.state:
-            if hasattr(ctx, 'actions') and hasattr(ctx.actions, 'state_delta'):
-                # Initialize via state_delta if possible, though direct init is often fine here
-                # as it's at the start of the orchestrator's run for this request.
-                # However, initialize_agent might be a more canonical place.
-                # For this change, we ensure it's present before use.
-                ctx.actions.state_delta = {"full_iteration_history": []}
-                # Ensure it's reflected in current session state for immediate use if state_delta is deferred
-                if "full_iteration_history" not in ctx.session.state: 
-                     ctx.session.state["full_iteration_history"] = []
-            else:
-                ctx.session.state["full_iteration_history"] = []
-        elif isinstance(ctx.session.state.get("full_iteration_history"), list):
-            # If it exists and is a list, clear it for this new workflow run.
-            # This assumes one orchestrator instance handles multiple requests sequentially
-            # and state might persist if not cleared by initialize_agent properly.
-            # A safer approach is for initialize_agent to always set/reset this.
-            # For now, let's ensure it's empty if it was already a list.
-            if hasattr(ctx, 'actions') and hasattr(ctx.actions, 'state_delta'):
-                ctx.actions.state_delta = {"full_iteration_history": []}
-                ctx.session.state["full_iteration_history"] = [] # Reflect for current execution
-            else:
-                ctx.session.state["full_iteration_history"] = []
-        else:
-            # If it exists but is not a list, force it to be an empty list
-            logger.warning(f"[{self.name}] 'full_iteration_history' in state was not a list. Re-initializing.")
-            if hasattr(ctx, 'actions') and hasattr(ctx.actions, 'state_delta'):
-                ctx.actions.state_delta = {"full_iteration_history": []}
-                ctx.session.state["full_iteration_history"] = [] # Reflect for current execution
-            else:
-                ctx.session.state["full_iteration_history"] = []
+        # Step 1: Direct initialization - No agent needed
+        logger.info(f"[{self.name}] Directly initializing history state...")
+        # Initialize state directly
+        history_state = {
+            "iterations": [],  # Legacy (kept for backward compatibility)
+            "full_iteration_history": [],  # Main tracking structure
+            "current_iteration": 0,  # Will be set to 1 before first STAR generation
+            "highest_rated_iteration": 0,
+            "highest_rating": 0.0,
+            "final_status": "IN_PROGRESS"
+        }
 
-        # Step 1: Initialize history
-        logger.info(f"[{self.name}] Initializing history...")
-        with time_operation(self.timing_tracker, "initialize_agent"):
-            async for event in self.initialize_agent.run_async(ctx):
-                # Log event information for debugging
-                logger.info(f"[{self.name}] Event from initialize_agent: {event.author} (has_content={event.content is not None})")
-                # Forward events from the initialize_agent
-                yield event
+        # Apply state update
+        if hasattr(ctx, 'actions') and hasattr(ctx.actions, 'state_delta'):
+            ctx.actions.state_delta = history_state
+            # Also update the session state for immediate use
+            for key, value in history_state.items():
+                ctx.session.state[key] = value
+        else:
+            # Direct state update
+            for key, value in history_state.items():
+                ctx.session.state[key] = value
+
+        logger.info(f"[{self.name}] History state initialized directly")
 
         # Step 2: Collect inputs
         logger.info(f"[{self.name}] Collecting inputs...")
@@ -282,27 +261,20 @@ class STAROrchestrator(BaseAgent):
             logger.info(f"[{self.name}] Post-critique state keys: {list(current_session.state.keys())}")
 
             # Debug: Check critique feedback directly
-            critique_feedback = current_session.state.get("critique_feedback", {})
-            print(f"[ORCHESTRATOR DEBUG] Critique feedback type: {type(critique_feedback)}")
+            critique_feedback_raw = current_session.state.get("critique_feedback", {})
+            print(f"[ORCHESTRATOR DEBUG] Critique feedback type: {type(critique_feedback_raw)}")
 
-            # Parse critique feedback if it's a string
-            if isinstance(critique_feedback, str):
-                try:
-                    # Clean markdown blocks if present
-                    cleaned = critique_feedback.strip()
-                    if cleaned.startswith("```"):
-                        cleaned = cleaned.split("\n", 1)[1]
-                    if cleaned.endswith("```"):
-                        cleaned = cleaned.rsplit("\n", 1)[0]
-                    critique_feedback = json.loads(cleaned)
-                    print(f"[ORCHESTRATOR DEBUG] Parsed critique feedback: {critique_feedback}")
-                except Exception as e:
-                    print(f"[ORCHESTRATOR DEBUG] Failed to parse critique feedback: {e}")
-                    critique_feedback = {}
+            # Parse critique feedback using our centralized utility
+            try:
+                parsed_debug_critique = parse_critique_feedback(critique_feedback_raw)
+                print(f"[ORCHESTRATOR DEBUG] Parsed critique feedback: {parsed_debug_critique}")
 
-            if critique_feedback:
-                direct_rating = critique_feedback.get('rating', 'NOT FOUND')
-                print(f"[ORCHESTRATOR DEBUG] Direct rating from critique_feedback: {direct_rating}")
+                if parsed_debug_critique:
+                    direct_rating = parsed_debug_critique.get('rating', 'NOT FOUND')
+                    print(f"[ORCHESTRATOR DEBUG] Direct rating from critique_feedback: {direct_rating}")
+            except Exception as e:
+                print(f"[ORCHESTRATOR DEBUG] Failed to parse critique feedback with utility: {e}")
+                # Continue with execution - this is just for debugging
 
             # Get the rating from the current iteration
             rating = 0.0
@@ -322,95 +294,32 @@ class STAROrchestrator(BaseAgent):
 
             # Process the critique feedback from the state (set by star_critique agent)
             critique_feedback_raw = ctx.session.state.get("critique_feedback")
-            parsed_rating = 0.0
-            critique_details_for_history = None # This will hold the structured critique
 
-            if isinstance(critique_feedback_raw, str):
-                raw_critique_str_for_parsing = critique_feedback_raw # Original raw string
-                
-                # Strip Markdown fences if present
-                processed_str = raw_critique_str_for_parsing.strip()
-                # Remove leading ```json or ```
-                if processed_str.startswith("```json"):
-                    processed_str = processed_str[len("```json"):]
-                elif processed_str.startswith("```"): # Handle case where it might just be ```
-                    processed_str = processed_str[len("```"):]
-                
-                # Remove trailing ```
-                if processed_str.endswith("```"):
-                    processed_str = processed_str[:-len("```")]
-                
-                # Strip again to clean up any whitespace left by fence removal or originally present
-                processed_str = processed_str.strip()
+            # Use centralized parsing utility for critique feedback
+            logger.info(f"[{self.name}] Parsing critique feedback using centralized utility")
 
-                try:
-                    critique_feedback_parsed = json.loads(processed_str) # Use processed_str for parsing
-                    rating_value = critique_feedback_parsed.get("rating")
-                    if rating_value is not None:
-                        try:
-                            rating = float(rating_value)
-                        except (ValueError, TypeError):
-                            logger.warning(f"[{self.name}] Could not convert rating '{rating_value}' from parsed JSON to float. Defaulting to 0.0.")
-                            rating = 0.0
-                    else:
-                        rating = 0.0 # Default if 'rating' key is missing in parsed JSON
-                    
-                    critique_details_for_history = critique_feedback_parsed
+            # Parse the critique feedback using our utility function
+            parsed_critique = parse_critique_feedback(critique_feedback_raw)
 
-                except json.JSONDecodeError as e:
-                    logger.error(f"[{self.name}] Failed to parse critique string: {e}. Original Raw: '{raw_critique_str_for_parsing}'. Processed attempt: '{processed_str}'")
-                    # Rating remains 0.0 (default)
-                    critique_details_for_history = {"error": f"JSONDecodeError: {e}", "original_raw": raw_critique_str_for_parsing, "processed_attempt": processed_str}
-                except Exception as e: # Catch other potential errors
-                    logger.error(f"[{self.name}] An unexpected error occurred while processing string critique_feedback: {e}. Original Raw: '{raw_critique_str_for_parsing}'. Processed attempt: '{processed_str}'")
-                    critique_details_for_history = {"error": f"Unexpected error: {e}", "original_raw": raw_critique_str_for_parsing, "processed_attempt": processed_str}
-            elif isinstance(critique_feedback_raw, dict):
-                critique_details_for_history = critique_feedback_raw
-                rating = float(critique_feedback_raw.get("rating", 0.0))
-            else:
-                logger.warning(f"[{self.name}] critique_feedback_raw is not a string or dict: {type(critique_feedback_raw)}. Raw: {critique_feedback_raw}")
-                critique_details_for_history = {"error": "Critique was not string or dict", "raw": str(critique_feedback_raw)}
+            # Extract the rating and use the parsed critique for history
+            rating = parsed_critique.get("rating", 0.0)
+            critique_details_for_history = parsed_critique
+
+            logger.info(f"[{self.name}] Successfully parsed critique feedback. Rating: {rating}")
 
             final_rating = rating
 
             # --- Start: Retrieve and parse the raw answer string from state ---
             raw_answer_string_key = self.star_generator.output_key if iteration == 1 else self.star_refiner.output_key
             raw_answer_string = ctx.session.state.get(raw_answer_string_key)
-            
-            parsed_answer_obj = {} # Default in case of issues
-            if isinstance(raw_answer_string, str):
-                cleaned_answer_string = raw_answer_string.strip()
-                # Remove markdown fences if present (e.g., ```json ... ``` or ``` ... ```)
-                if cleaned_answer_string.startswith("```json"):
-                    cleaned_answer_string = cleaned_answer_string[len("```json"):]
-                elif cleaned_answer_string.startswith("```"):
-                    # Attempt to strip ``` and optional language, then the first newline
-                    first_newline_idx = cleaned_answer_string.find('\n')
-                    if first_newline_idx != -1 and first_newline_idx < 20: # Limit lang spec length
-                        cleaned_answer_string = cleaned_answer_string[first_newline_idx+1:]
-                    else: # If no newline or lang spec is too long, just strip ```
-                        cleaned_answer_string = cleaned_answer_string[len("```"):]
-                
-                if cleaned_answer_string.endswith("```"):
-                    cleaned_answer_string = cleaned_answer_string[:-len("```")]
-                
-                cleaned_answer_string = cleaned_answer_string.strip() # Strip again after fence removal
-                
-                if not cleaned_answer_string:
-                    logger.error(f"[{self.name}] Iteration {iteration}: Cleaned answer string from key '{raw_answer_string_key}' is empty after stripping markdown. Raw: '{raw_answer_string[:100]}...'")
-                    parsed_answer_obj = {"error": "Empty answer string after cleaning", "raw_answer_snippet": raw_answer_string[:200]}
-                else:
-                    try:
-                        parsed_answer_obj = json.loads(cleaned_answer_string)
-                    except json.JSONDecodeError as e:
-                        logger.error(f"[{self.name}] Iteration {iteration}: Failed to parse answer string from key '{raw_answer_string_key}'. Error: {e}. Cleaned String: '{cleaned_answer_string[:200]}...' Raw String: '{raw_answer_string[:200]}...'")
-                        parsed_answer_obj = {"error": "Failed to parse answer JSON", "cleaned_answer_snippet": cleaned_answer_string[:200], "raw_answer_snippet": raw_answer_string[:200]}
-            elif isinstance(raw_answer_string, dict):
-                logger.warning(f"[{self.name}] Iteration {iteration}: Answer from key '{raw_answer_string_key}' was already a dict. Using as is, though this is unexpected after removing append_star_response.")
-                parsed_answer_obj = raw_answer_string
-            else:
-                logger.error(f"[{self.name}] Iteration {iteration}: Answer from key '{raw_answer_string_key}' is not a string or dict. Type: {type(raw_answer_string)}. Value: '{str(raw_answer_string)[:200]}'")
-                parsed_answer_obj = {"error": "Unexpected answer type in state", "raw_value_snippet": str(raw_answer_string)[:200]}
+
+            # Use centralized parsing utility for STAR answer
+            logger.info(f"[{self.name}] Iteration {iteration}: Parsing STAR answer using centralized utility from key '{raw_answer_string_key}'")
+
+            # Parse the STAR answer using our utility function
+            parsed_answer_obj = parse_star_answer(raw_answer_string)
+
+            logger.info(f"[{self.name}] Successfully parsed STAR answer with keys: {list(parsed_answer_obj.keys()) if isinstance(parsed_answer_obj, dict) else 'Not a dict'}")
             # --- End: Retrieve and parse the raw answer string ---
 
             # --- Start: Define iteration_entry and append to full_iteration_history ---
