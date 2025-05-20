@@ -151,6 +151,7 @@ logging.getLogger('google_genai').setLevel(logging.WARNING)
 logging.getLogger('google_genai.models').setLevel(logging.WARNING)
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('refiner_agent.orchestrator').setLevel(logging.WARNING)
+logging.getLogger('refiner_agent.tools').setLevel(logging.DEBUG)
 
 # Global error handler for all routes
 @app.errorhandler(Exception)
@@ -344,32 +345,33 @@ def chat_with_agent(validated_data: STARGeneratorRequest):
             if event.is_final_response():
                 print(f"[DEBUG] Final response event {i} from {event.author}")
 
-            # Check for FinalOutputRetrieverAgent response
-            if event.author == 'FinalOutputRetrieverAgent' and event.is_final_response():
+            # Check for the main agent's final response (e.g., from 'refiner_agent')
+            if event.author == root_agent.name and event.is_final_response():
                 if event.content and event.content.parts:
                     for part in event.content.parts:
                         if hasattr(part, 'text') and part.text:
                             print(f"[DEBUG] Raw text from FinalOutputRetrieverAgent: {part.text[:500]}...")
 
-                            # Clean up markdown code blocks
-                            cleaned_text = _clean_json_string(part.text)
+                            # Commented out: Clean up markdown code blocks
+                            # cleaned_text = _clean_json_string(part.text)
+                            raw_json_text_from_agent = part.text # New variable to hold the direct text
 
                             try:
-                                # Try to fix common JSON issues before parsing
-                                if cleaned_text.count('{') > cleaned_text.count('}'):
-                                    # Add missing closing braces
-                                    cleaned_text += '}' * (cleaned_text.count('{') - cleaned_text.count('}'))
-                                elif cleaned_text.count('[') > cleaned_text.count(']'):
-                                    # Add missing closing brackets
-                                    cleaned_text += ']' * (cleaned_text.count('[') - cleaned_text.count(']'))
+                                # Commented out: Try to fix common JSON issues before parsing
+                                # if raw_json_text_from_agent.count('{') > raw_json_text_from_agent.count('}'):
+                                #     # Add missing closing braces
+                                #     raw_json_text_from_agent += '}' * (raw_json_text_from_agent.count('{') - raw_json_text_from_agent.count('}'))
+                                # elif raw_json_text_from_agent.count('[') > raw_json_text_from_agent.count(']'):
+                                #     # Add missing closing brackets
+                                #     raw_json_text_from_agent += ']' * (raw_json_text_from_agent.count('[') - raw_json_text_from_agent.count(']'))
 
-                                # Remove trailing commas before closing braces/brackets
-                                import re
-                                cleaned_text = re.sub(r',\s*}', '}', cleaned_text)
-                                cleaned_text = re.sub(r',\s*]', ']', cleaned_text)
+                                # Commented out: Remove trailing commas before closing braces/brackets
+                                # import re
+                                # raw_json_text_from_agent = re.sub(r',\s*}', '}', raw_json_text_from_agent)
+                                # raw_json_text_from_agent = re.sub(r',\s*]', ']', raw_json_text_from_agent)
 
-                                # Parse the JSON content
-                                json_data = json.loads(cleaned_text)
+                                # Parse the JSON content directly from agent output
+                                json_data = json.loads(raw_json_text_from_agent)
                                 print(f"[DEBUG] Parsed JSON keys: {list(json_data.keys())}")
 
                                 # The agent should output the data directly now
@@ -377,6 +379,13 @@ def chat_with_agent(validated_data: STARGeneratorRequest):
                                 print(f"\n[DEBUG] Retrieved output from FinalOutputRetrieverAgent")
                                 print(f"[DEBUG] JSON data keys: {list(json_data.keys())}")
                                 print(f"[DEBUG] JSON data type: {type(json_data)}")
+
+                                # Debug timing data specifically
+                                if 'timing_data' in json_data:
+                                    print(f"[DEBUG] Found timing_data with {len(json_data['timing_data'])} entries")
+                                    print(f"[DEBUG] Timing data operations: {list(json_data['timing_data'].keys())}")
+                                else:
+                                    print("[DEBUG] No timing_data found in JSON output!")
 
                                 # Add detailed debugging for iteration history
                                 if 'history' in processed_final_output_dict:
@@ -452,6 +461,12 @@ def chat_with_agent(validated_data: STARGeneratorRequest):
             # Debug the formatted response
             app.logger.info(f"[DEBUG] Formatted response history length: {len(formatted_response.get('history', []))}")
 
+            # Debug timing data in formatted response
+            if 'metadata' in formatted_response and 'timing_data' in formatted_response['metadata']:
+                app.logger.info(f"[DEBUG] Formatted response includes timing_data with {len(formatted_response['metadata']['timing_data'])} operations")
+            else:
+                app.logger.info("[DEBUG] Formatted response does not include timing_data")
+
             # Validate the response against our schema
             try:
                 validated_response = validate_response(formatted_response, STARGeneratorResponse)
@@ -511,6 +526,7 @@ def chat_with_agent(validated_data: STARGeneratorRequest):
                     return jsonify(error_response), 500
             except Exception as e:
                 app.logger.error(f"Error parsing agent response: {e}")
+                app.logger.error(f"Response was: {raw_agent_text_response}")
 
                 # Construct an error response in our formatted structure
                 request_data = request.get_json()
@@ -609,6 +625,26 @@ def chat_with_agent(validated_data: STARGeneratorRequest):
 from .object_handlers import clean_json_string as _clean_json_string
 
 # Note: format_agent_response is imported from response_formatters (line 12)
+
+
+@app.route('/timing-analysis', methods=['GET'])
+def timing_analysis():
+    """Endpoint to retrieve timing analysis data from recent requests."""
+    # For now, return a simple message about timing data
+    # In a production system, this would query a database or cache of timing data
+    return jsonify({
+        "message": "Timing data is included in the metadata.timing_data field of each response",
+        "example_operations": [
+            "total_workflow",
+            "initialize_agent",
+            "input_collector",
+            "star_generator",
+            "star_critique_iteration_1",
+            "star_refiner_iteration_1",
+            "output_retriever"
+        ],
+        "description": "Each operation includes the time in seconds it took to complete"
+    })
 
 
 if __name__ == '__main__':
